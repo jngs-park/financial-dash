@@ -1,0 +1,23 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: financial-dash-mysql
+    environment:
+      MYSQL_DATABASE: financial_dash
+      MYSQL_USER: dash
+      MYSQL_PASSWORD: dashpass
+      MYSQL_ROOT_PASSWORD: rootpass
+      TZ: Asia/Seoul
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7
+    container_name: financial-dash-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  mysql_data:
