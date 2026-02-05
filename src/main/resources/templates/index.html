@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <title>Financial Dash</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+    body { font-family: Arial, sans-serif; padding: 16px; }
+    #debug { white-space: pre-wrap; background:#f7f7f7; padding:12px; border-radius:8px; }
+    canvas { border: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+<h2>KRW-BTC Price History</h2>
+
+<div id="debug">loading...</div>
+<br />
+<canvas id="priceChart" width="900" height="420"></canvas>
+
+<script>
+    async function loadHistory() {
+      const market = "KRW-BTC";
+      const url = `/api/market/upbit/history?market=${encodeURIComponent(market)}`;
+
+      const debug = (msg) => {
+        document.getElementById("debug").textContent += `\n${msg}`;
+      };
+
+      document.getElementById("debug").textContent = `Fetching: ${url}\n`;
+
+      let res;
+      try {
+        res = await fetch(url);
+      } catch (e) {
+        debug("❌ fetch error: " + e);
+        return;
+      }
+
+      debug(`HTTP ${res.status}`);
+
+      const text = await res.text();
+      debug("Raw response (first 200 chars): " + text.slice(0, 200));
+
+      let list;
+      try {
+        list = JSON.parse(text);
+      } catch (e) {
+        debug("❌ JSON parse failed. (응답이 JSON이 아님)");
+        return;
+      }
+
+      if (!Array.isArray(list)) {
+        debug("❌ Response is not an array.");
+        return;
+      }
+
+      debug(`Array length: ${list.length}`);
+      if (list.length > 0) debug("First item keys: " + Object.keys(list[0]).join(", "));
+
+      // createdAt or fetchedAt 둘 다 대응
+      const labels = list.map(x => {
+        const t = x.createdAt ?? x.fetchedAt ?? x.timestamp;
+        return t ? new Date(t).toLocaleTimeString() : "";
+      });
+
+      const prices = list.map(x => Number(x.price));
+      debug("prices sample: " + prices.slice(0, 5).join(", "));
+
+      // 데이터가 2개 미만이면 선이 거의 안 보일 수 있음
+      if (prices.length < 2) {
+        debug("⚠️ 데이터가 2개 미만이라 선이 안 보일 수 있어요. (점만 찍힘)");
+      }
+
+      const canvas = document.getElementById("priceChart");
+      const ctx = canvas.getContext("2d");
+
+      new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [{
+            label: "BTC Price (KRW)",
+            data: prices,
+            borderWidth: 2,
+            pointRadius: 3
+          }]
+        },
+        options: {
+          responsive: false,
+          scales: {
+            y: { beginAtZero: false }
+          }
+        }
+      });
+
+      debug("✅ Chart rendered.");
+    }
+
+    loadHistory();
+  </script>
+</body>
+</html>
