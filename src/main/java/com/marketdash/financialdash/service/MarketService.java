@@ -5,6 +5,8 @@ import com.marketdash.financialdash.dto.MarketPriceResponse;
 import com.marketdash.financialdash.dto.UpbitTickerResponse;
 import com.marketdash.financialdash.service.cache.SimpleCacheStore;
 import org.springframework.stereotype.Service;
+import com.marketdash.financialdash.entity.MarketPriceHistory;
+import com.marketdash.financialdash.repository.MarketPriceHistoryRepository;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -16,9 +18,11 @@ public class MarketService {
 
     private final UpbitClient upbitClient;
     private final SimpleCacheStore cacheStore = new SimpleCacheStore();
-
-    public MarketService(UpbitClient upbitClient) {
+    private final MarketPriceHistoryRepository historyRepository;
+    public MarketService(UpbitClient upbitClient,
+                         MarketPriceHistoryRepository historyRepository) {
         this.upbitClient = upbitClient;
+        this.historyRepository = historyRepository;
     }
 
     public MarketPriceResponse getUpbitPrice(String market) {

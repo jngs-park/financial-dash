@@ -1,23 +1,21 @@
+version: "3.8"
+
 services:
   mysql:
     image: mysql:8.0
     container_name: financial-dash-mysql
+    ports:
+      - "3306:3306"
     environment:
+      MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: financial_dash
       MYSQL_USER: dash
-      MYSQL_PASSWORD: dashpass
-      MYSQL_ROOT_PASSWORD: rootpass
-      TZ: Asia/Seoul
-    ports:
-      - "3307:3306"
+      MYSQL_PASSWORD: dash
+    command:
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
     volumes:
-      - mysql_data:/var/lib/mysql
-
-  redis:
-    image: redis:7
-    container_name: financial-dash-redis
-    ports:
-      - "6379:6379"
+      - mysql-data:/var/lib/mysql
 
 volumes:
-  mysql_data:
+  mysql-data:
