@@ -1,6 +1,6 @@
 package com.marketdash.financialdash.controller;
 
-import com.marketdash.financialdash.dto.UpbitTickerResponse;
+import com.marketdash.financialdash.dto.MarketPriceResponse;
 import com.marketdash.financialdash.service.MarketService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,7 +18,10 @@ public class MarketController {
     }
 
     @GetMapping("/upbit/ticker")
-    public UpbitTickerResponse ticker(@RequestParam(defaultValue = "KRW-BTC") String market) {
+    public MarketPriceResponse ticker(
+            @RequestParam(defaultValue = "KRW-BTC") String market
+    ) {
+        // ✅ 서비스가 반환하는 타입 그대로 리턴
         return marketService.getUpbitPrice(market);
     }
 }
