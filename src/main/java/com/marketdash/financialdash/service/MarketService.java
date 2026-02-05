@@ -82,4 +82,17 @@ public class MarketService {
                 ))
                 .toList();
     }
+
+    public void fetchAndSaveUpbitPrice(String market) {
+        UpbitTickerResponse ticker = upbitClient.getTicker(market);
+
+        MarketPriceHistory history = MarketPriceHistory.of(
+                ticker.market(),                          // 예: KRW-BTC
+                BigDecimal.valueOf(ticker.tradePrice()),  // 현재가
+                "UPBIT"
+        );
+
+        historyRepository.save(history);
+    }
+
 }
