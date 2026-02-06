@@ -8,22 +8,35 @@
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
 
     <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; }
-    .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
-    .badge { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; font-size: 14px; }
-
-    /* ✅ 차트는 부모 컨테이너가 높이를 갖게 하고 canvas는 100%로만 */
-    #chartWrap {
-      width: 100%;
-      max-width: 980px;
-      height: 420px;
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      padding: 16px;
+      margin: 0;
     }
-    #chartWrap canvas {
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .badge {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #f2f2f2;
+      font-size: 14px;
+    }
+    .chart-wrap {
+      max-width: 980px;
+      width: 100%;
+      height: 420px;      /* ✅ 높이 고정: 브라우저가 길어지는 문제 방지 */
+      position: relative; /* Chart.js responsive에서 권장 */
+    }
+    canvas {
       width: 100% !important;
-      height: 100% !important;
+      height: 100% !important; /* ✅ 컨테이너 높이를 그대로 사용 */
       display: block;
     }
-
     #debug {
       margin-top: 10px;
       white-space: pre-wrap;
@@ -37,15 +50,15 @@
     }
   </style>
 </head>
-
 <body>
+
 <div class="row">
     <h2 style="margin: 0;">KRW-BTC Price History</h2>
     <div class="badge" id="trendBadge">Trend: -</div>
     <div class="badge" id="lastBadge">Last: -</div>
 </div>
 
-<div id="chartWrap">
+<div class="chart-wrap">
     <canvas id="priceChart"></canvas>
 </div>
 
@@ -53,28 +66,42 @@
 
 <script>
     const MARKET = "KRW-BTC";
-    const URL = `/api/market/upbit/history?market=${MARKET}`;
-    const INTERVAL_MS = 3000;
+    const API_URL = `/api/market/upbit/history?market=${encodeURIComponent(MARKET)}`;
 
-    let chart = null;
+    const REFRESH_MS = 3000;
+    const WINDOW_MIN = 10; // ✅ 최근 10분만 화면에 고정 표시
 
-    function setDebug(msg) {
-      document.getElementById("debug").textContent = msg;
-    }
+    let chart;
 
-    function formatKST(timeIso) {
-      const d = new Date(timeIso);
+    function formatKST(isoOrDate) {
+      const d = (isoOrDate instanceof Date) ? isoOrDate : new Date(isoOrDate);
       return d.toLocaleTimeString("ko-KR", { hour12: false });
     }
 
-    function formatPrice(n) {
+    function formatKRW(n) {
       try { return Number(n).toLocaleString("ko-KR"); }
       catch { return String(n); }
     }
 
-    function ensureChartOnce() {
-      if (chart) return;
+    function setDebug(lines) {
+      document.getElementById("debug").textContent = lines.join("\n");
+    }
 
+    function calcTrend(points) {
+      // points: [{x:Date, y:number}]
+      if (!points || points.length < 2) return { pct: 0, dir: "-", label: "데이터 부족" };
+
+      const first = points[0].y;
+      const last  = points[points.length - 1].y;
+      if (!first || !isFinite(first) || !isFinite(last)) return { pct: 0, dir: "-", label: "데이터 오류" };
+
+      const pct = ((last - first) / first) * 100;
+      const dir = pct > 0 ? "↑" : (pct < 0 ? "↓" : "→");
+      const label = pct > 0 ? "상승" : (pct < 0 ? "하락" : "보합");
+      return { pct, dir, label };
+    }
+
+    function ensureChart() {
       const ctx = document.getElementById("priceChart").getContext("2d");
 
       chart = new Chart(ctx, {
@@ -82,107 +109,132 @@
         data: {
           datasets: [{
             label: "BTC (KRW)",
-            data: [],              // [{x: Date, y: number}]
-            parsing: false,        // 직접 x,y 넣을 거라 파싱 off
+            data: [],           // [{x: Date, y: number}]
+            parsing: false,     // x/y 직접 제공
             pointRadius: 0,
             borderWidth: 2,
-            tension: 0.2,
+            tension: 0.2
           }]
         },
         options: {
-          responsive: true,
-          maintainAspectRatio: false,
           animation: false,
+          responsive: true,
+          maintainAspectRatio: false, // ✅ 컨테이너 높이 고정
           scales: {
             x: {
               type: "time",
-              time: { unit: "minute" },
-              ticks: { maxRotation: 0 }
+              time: {
+                unit: "second",
+                displayFormats: { second: "HH:mm:ss" }
+              },
+              ticks: {
+                autoSkip: true,
+                maxTicksLimit: 8,
+                maxRotation: 0
+              }
             },
-            y: { beginAtZero: false }
+            y: {
+              beginAtZero: false
+            }
+          },
+          plugins: {
+            legend: { display: true }
           }
         }
       });
     }
 
-    function updateBadges(points) {
-      const trendEl = document.getElementById("trendBadge");
-      const lastEl = document.getElementById("lastBadge");
+    async function loadHistory() {
+      const startedAt = Date.now();
 
-      if (!points || points.length < 2) {
-        trendEl.textContent = "Trend: -";
-        lastEl.textContent = "Last: -";
+      const debugLines = [];
+      debugLines.push(`Fetching: ${API_URL}`);
+
+      let res, rawText, data;
+      try {
+        res = await fetch(API_URL, { cache: "no-store" });
+        rawText = await res.text();
+      } catch (e) {
+        debugLines.push(`❌ fetch failed: ${String(e)}`);
+        setDebug(debugLines);
         return;
       }
 
-      const first = points[0].y;
-      const last = points[points.length - 1].y;
+      debugLines.push(`HTTP ${res.status}`);
 
-      const diffPct = first === 0 ? 0 : ((last - first) / first) * 100;
-      const arrow = diffPct >= 0 ? "↑ 상승" : "↓ 하락";
-
-      trendEl.textContent = `Trend: ${arrow} (${diffPct.toFixed(3)}%)`;
-      lastEl.textContent = `Last: ${formatPrice(last)} (${formatKST(points[points.length - 1].x.toISOString())})`;
-    }
-
-    async function loadHistoryAndUpdate() {
-      setDebug(`Fetching: ${URL}`);
+      if (!res.ok) {
+        debugLines.push(`Raw response (first 200 chars): ${rawText.slice(0, 200)}`);
+        setDebug(debugLines);
+        return;
+      }
 
       try {
-        const res = await fetch(URL, { cache: "no-store" });
-        const rawText = await res.text();
-
-        if (!res.ok) {
-          setDebug(`HTTP ${res.status}\nRaw response (first 200 chars): ${rawText.slice(0, 200)}`);
-          return;
-        }
-
-        let data;
-        try {
-          data = JSON.parse(rawText);
-        } catch (e) {
-          setDebug(`JSON parse failed\nRaw response (first 200 chars): ${rawText.slice(0, 200)}`);
-          return;
-        }
-
-        const list = Array.isArray(data) ? data : (data.items ?? []);
-        if (!Array.isArray(list)) {
-          setDebug(`❌ Response is not an array.\nRaw: ${rawText.slice(0, 200)}`);
-          return;
-        }
-
-        const points = list
-          .map(p => {
-            const t = p.createdAt ?? p.fetchedAt;
-            const priceNum = Number(p.price);
-            if (!t || Number.isNaN(priceNum)) return null;
-            return { x: new Date(t), y: priceNum };
-          })
-          .filter(Boolean);
-
-        if (points.length === 0) {
-          setDebug("OK but empty data");
-          return;
-        }
-
-        ensureChartOnce();
-        chart.data.datasets[0].data = points;
-        chart.update("none");
-
-        updateBadges(points);
-
-        const lastTime = points[points.length - 1].x.toISOString();
-        setDebug(`✅ Loaded ${points.length} points / last=${formatKST(lastTime)}`);
-
-      } catch (err) {
-        setDebug(`❌ fetch error: ${String(err)}`);
+        data = JSON.parse(rawText);
+      } catch (e) {
+        debugLines.push("❌ JSON parse failed");
+        debugLines.push(`Raw response (first 200 chars): ${rawText.slice(0, 200)}`);
+        setDebug(debugLines);
+        return;
       }
+
+      const list = Array.isArray(data) ? data : (data.items ?? []);
+      if (!Array.isArray(list)) {
+        debugLines.push("❌ Response is not an array.");
+        setDebug(debugLines);
+        return;
+      }
+
+      // 원본을 points로 변환
+      const points = list
+        .map(p => {
+          const t = p.createdAt ?? p.fetchedAt;
+          const priceNum = Number(p.price);
+          if (!t || Number.isNaN(priceNum)) return null;
+          return { x: new Date(t), y: priceNum };
+        })
+        .filter(Boolean);
+
+      if (!chart) ensureChart();
+
+      // ✅ 화면 범위를 최근 WINDOW_MIN분으로 고정
+      const max = Date.now();
+      const min = max - WINDOW_MIN * 60 * 1000;
+      chart.options.scales.x.min = min;
+      chart.options.scales.x.max = max;
+
+      // 데이터는 전체 넣되, 화면은 min/max로 잘려 보임
+      chart.data.datasets[0].data = points;
+      chart.update("none");
+
+      // 화면 구간(최근 WINDOW_MIN분)만 따로 뽑아서 Trend/Last 계산
+      const pointsWindow = points.filter(p => p.x.getTime() >= min && p.x.getTime() <= max);
+
+      if (pointsWindow.length === 0) {
+        document.getElementById("trendBadge").textContent = "Trend: - (empty)";
+        document.getElementById("lastBadge").textContent = "Last: -";
+        debugLines.push("OK but empty data (window)");
+        setDebug(debugLines);
+        return;
+      }
+
+      const trend = calcTrend(pointsWindow);
+      const lastPoint = pointsWindow[pointsWindow.length - 1];
+
+      document.getElementById("trendBadge").textContent =
+        `Trend: ${trend.dir} ${trend.label} (${trend.pct.toFixed(3)}%)`;
+
+      document.getElementById("lastBadge").textContent =
+        `Last: ${formatKRW(lastPoint.y)} (${formatKST(lastPoint.x)})`;
+
+      const took = Date.now() - startedAt;
+      debugLines.push(`✅ Loaded total=${points.length}, window=${pointsWindow.length}, last=${formatKST(lastPoint.x)}, took=${took}ms`);
+      setDebug(debugLines);
     }
 
-    // ✅ 시작: 차트는 1번만 만들고, 이후는 데이터만 업데이트
-    ensureChartOnce();
-    loadHistoryAndUpdate();
-    setInterval(loadHistoryAndUpdate, INTERVAL_MS);
+    // start
+    ensureChart();
+    loadHistory();
+    setInterval(loadHistory, REFRESH_MS);
   </script>
 </body>
 </html>
