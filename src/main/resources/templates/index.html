@@ -4,138 +4,92 @@
     <meta charset="UTF-8" />
     <title>Financial Dash</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 24px; }
-    #status { margin: 10px 0 16px; color: #555; }
-    .row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
-    .pill { padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; font-size: 13px; }
-    .err { color: #b00020; white-space: pre-wrap; }
-    canvas { max-width: 980px; }
-  </style>
 </head>
 <body>
 <h2>KRW-BTC Price History</h2>
 
-<div class="row">
-    <span class="pill" id="endpoint"></span>
-    <span class="pill" id="lastUpdated">Last updated: -</span>
-</div>
-
 <div id="status">Loading...</div>
-<div id="error" class="err"></div>
-
-<canvas id="priceChart" width="980" height="420"></canvas>
+<canvas id="priceChart" width="900" height="420"></canvas>
 
 <script>
-  const market = "KRW-BTC";
-  const endpoint = `/api/market/upbit/history?market=${encodeURIComponent(market)}`;
+const market = "KRW-BTC";
+const API_URL = `/api/market/upbit/history?market=${market}`;
 
-  document.getElementById("endpoint").textContent = `Fetching: ${endpoint}`;
+let chart;
 
-  let chart = null;
+function formatKSTTime(date) {
+  return date.toLocaleTimeString("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+}
 
-  function toLabel(ts) {
-    // ts가 ISO 문자열이면 Date로 변환
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return String(ts);
-    // 보기 좋게 HH:mm:ss
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${hh}:${mm}:${ss}`;
+async function loadHistoryAndRender() {
+  const statusEl = document.getElementById("status");
+  statusEl.innerText = `Fetching: ${API_URL}`;
+
+  const res = await fetch(API_URL);
+  if (!res.ok) {
+    const text = await res.text();
+    statusEl.innerText = `HTTP ${res.status} - ${text.slice(0, 120)}`;
+    return;
   }
 
-  async function fetchHistory() {
-    const statusEl = document.getElementById("status");
-    const errEl = document.getElementById("error");
-
-    errEl.textContent = "";
-
-    const res = await fetch(endpoint, { cache: "no-store" });
-
-    if (!res.ok) {
-      const raw = await res.text();
-      statusEl.textContent = `HTTP ${res.status}`;
-      errEl.textContent =
-        `Raw response (first 200 chars): ${raw.slice(0, 200)}\n❌ API 응답이 정상(JSON array)인지 확인하세요.`;
-      return null;
+  const data = await res.json();
+  if (!Array.isArray(data) || data.length === 0) {
+    statusEl.innerText = "OK but empty data";
+    if (chart) {
+      chart.data.labels = [];
+      chart.data.datasets[0].data = [];
+      chart.update("none");
     }
-
-    const data = await res.json();
-
-    if (!Array.isArray(data)) {
-      statusEl.textContent = "❌ Response is not an array.";
-      errEl.textContent = JSON.stringify(data).slice(0, 300);
-      return null;
-    }
-
-    statusEl.textContent = `OK (${data.length} points)`;
-    return data;
+    return;
   }
 
-  function buildOrUpdateChart(items) {
-    // items 원소는 { price, createdAt } 또는 { price, fetchedAt } 둘 다 대응
-    const labels = items.map(x => toLabel(x.createdAt ?? x.fetchedAt));
-    const prices = items.map(x => Number(x.price));
+  // labels(시간 문자열) + values(가격)로 분리
+  const labels = data.map(x => formatKSTTime(new Date(x.createdAt)));
+  const values = data.map(x => Number(x.price));
 
-    const ctx = document.getElementById("priceChart").getContext("2d");
+  statusEl.innerText = `✅ Loaded ${data.length} points / last=${labels[labels.length - 1]}`;
 
-    if (!chart) {
-      chart = new Chart(ctx, {
-        type: "line",
-        data: {
-          labels,
-          datasets: [{
-            label: `${market} price`,
-            data: prices,
-            borderWidth: 2,
-            pointRadius: 0,
-            tension: 0.25
-          }]
-        },
-        options: {
-          responsive: true,
-          animation: false,
-          scales: {
-            y: {
-              ticks: {
-                callback: (v) => Number(v).toLocaleString()
-              }
+  if (!chart) {
+    const ctx = document.getElementById("priceChart");
+    chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          label: market,
+          data: values,
+          pointRadius: 0,
+          tension: 0.2
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        scales: {
+          x: {
+            ticks: {
+              // 너무 빽빽하면 일부만 표시
+              maxTicksLimit: 10
             }
           },
-          plugins: {
-            legend: { display: true }
-          }
+          y: { beginAtZero: false }
         }
-      });
-      return;
-    }
-
-    // ✅ 핵심: 기존 차트 데이터만 갱신
+      }
+    });
+  } else {
     chart.data.labels = labels;
-    chart.data.datasets[0].data = prices;
-    chart.update();
+    chart.data.datasets[0].data = values;
+    chart.update("none");
   }
+}
 
-  async function refreshOnce() {
-    const items = await fetchHistory();
-    if (!items) return;
-
-    // 너무 많아지면 최근 N개만 (원하면 숫자 바꿔도 됨)
-    const N = 60;
-    const sliced = items.length > N ? items.slice(items.length - N) : items;
-
-    buildOrUpdateChart(sliced);
-
-    document.getElementById("lastUpdated").textContent =
-      `Last updated: ${new Date().toLocaleTimeString()}`;
-  }
-
-  // 1) 최초 1회 로드
-  refreshOnce();
-
-  // 2) ✅ 자동 갱신: 3초마다 (원하면 1000~10000 사이로 조절)
-  setInterval(refreshOnce, 3000);
+loadHistoryAndRender();
+setInterval(loadHistoryAndRender, 3000);
 </script>
 </body>
 </html>

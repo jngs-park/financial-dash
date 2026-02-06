@@ -69,16 +69,15 @@ public class MarketService {
         return response;
     }
 
-    /**
-     * 업비트 시세 히스토리 조회 (차트용)
-     */
     public List<MarketPriceHistoryResponse> getUpbitPriceHistory(String market) {
-        return historyRepository
-                .findByMarketOrderByCreatedAtAsc(market)
-                .stream()
+        // 최신 300개를 가져온 다음(Desc), 차트용으로 Asc로 뒤집어서 반환
+        List<MarketPriceHistory> rows = historyRepository.findTop300ByMarketOrderByCreatedAtDesc(market);
+        java.util.Collections.reverse(rows);
+
+        return rows.stream()
                 .map(h -> new MarketPriceHistoryResponse(
                         h.getPrice(),
-                        h.getCreatedAt()
+                        h.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant()
                 ))
                 .toList();
     }

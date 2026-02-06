@@ -32,10 +32,15 @@ public class MarketController {
     public String index() {
         return "index";
     }
+    // ✅ 1) 단건(현재가)
+    @GetMapping("/upbit")
+    public MarketPriceResponse upbitPrice(@RequestParam String market) {
+        return marketService.getUpbitPrice(market);
+    }
 
     @GetMapping("/upbit/history")
     @ResponseBody
-    public List<MarketPriceHistoryResponse> upbitHistory(@RequestParam String market) {
+    public List<MarketPriceHistoryResponse> History(@RequestParam String market) {
         return marketService.getUpbitPriceHistory(market);
     }
 }
