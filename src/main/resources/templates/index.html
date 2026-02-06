@@ -5,98 +5,137 @@
     <title>Financial Dash</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-    body { font-family: Arial, sans-serif; padding: 16px; }
-    #debug { white-space: pre-wrap; background:#f7f7f7; padding:12px; border-radius:8px; }
-    canvas { border: 1px solid #ddd; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 24px; }
+    #status { margin: 10px 0 16px; color: #555; }
+    .row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .pill { padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; font-size: 13px; }
+    .err { color: #b00020; white-space: pre-wrap; }
+    canvas { max-width: 980px; }
   </style>
 </head>
 <body>
 <h2>KRW-BTC Price History</h2>
 
-<div id="debug">loading...</div>
-<br />
-<canvas id="priceChart" width="900" height="420"></canvas>
+<div class="row">
+    <span class="pill" id="endpoint"></span>
+    <span class="pill" id="lastUpdated">Last updated: -</span>
+</div>
+
+<div id="status">Loading...</div>
+<div id="error" class="err"></div>
+
+<canvas id="priceChart" width="980" height="420"></canvas>
 
 <script>
-    async function loadHistory() {
-      const market = "KRW-BTC";
-      const url = `/api/market/upbit/history?market=${encodeURIComponent(market)}`;
+  const market = "KRW-BTC";
+  const endpoint = `/api/market/upbit/history?market=${encodeURIComponent(market)}`;
 
-      const debug = (msg) => {
-        document.getElementById("debug").textContent += `\n${msg}`;
-      };
+  document.getElementById("endpoint").textContent = `Fetching: ${endpoint}`;
 
-      document.getElementById("debug").textContent = `Fetching: ${url}\n`;
+  let chart = null;
 
-      let res;
-      try {
-        res = await fetch(url);
-      } catch (e) {
-        debug("❌ fetch error: " + e);
-        return;
-      }
+  function toLabel(ts) {
+    // ts가 ISO 문자열이면 Date로 변환
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    // 보기 좋게 HH:mm:ss
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
 
-      debug(`HTTP ${res.status}`);
+  async function fetchHistory() {
+    const statusEl = document.getElementById("status");
+    const errEl = document.getElementById("error");
 
-      const text = await res.text();
-      debug("Raw response (first 200 chars): " + text.slice(0, 200));
+    errEl.textContent = "";
 
-      let list;
-      try {
-        list = JSON.parse(text);
-      } catch (e) {
-        debug("❌ JSON parse failed. (응답이 JSON이 아님)");
-        return;
-      }
+    const res = await fetch(endpoint, { cache: "no-store" });
 
-      if (!Array.isArray(list)) {
-        debug("❌ Response is not an array.");
-        return;
-      }
+    if (!res.ok) {
+      const raw = await res.text();
+      statusEl.textContent = `HTTP ${res.status}`;
+      errEl.textContent =
+        `Raw response (first 200 chars): ${raw.slice(0, 200)}\n❌ API 응답이 정상(JSON array)인지 확인하세요.`;
+      return null;
+    }
 
-      debug(`Array length: ${list.length}`);
-      if (list.length > 0) debug("First item keys: " + Object.keys(list[0]).join(", "));
+    const data = await res.json();
 
-      // createdAt or fetchedAt 둘 다 대응
-      const labels = list.map(x => {
-        const t = x.createdAt ?? x.fetchedAt ?? x.timestamp;
-        return t ? new Date(t).toLocaleTimeString() : "";
-      });
+    if (!Array.isArray(data)) {
+      statusEl.textContent = "❌ Response is not an array.";
+      errEl.textContent = JSON.stringify(data).slice(0, 300);
+      return null;
+    }
 
-      const prices = list.map(x => Number(x.price));
-      debug("prices sample: " + prices.slice(0, 5).join(", "));
+    statusEl.textContent = `OK (${data.length} points)`;
+    return data;
+  }
 
-      // 데이터가 2개 미만이면 선이 거의 안 보일 수 있음
-      if (prices.length < 2) {
-        debug("⚠️ 데이터가 2개 미만이라 선이 안 보일 수 있어요. (점만 찍힘)");
-      }
+  function buildOrUpdateChart(items) {
+    // items 원소는 { price, createdAt } 또는 { price, fetchedAt } 둘 다 대응
+    const labels = items.map(x => toLabel(x.createdAt ?? x.fetchedAt));
+    const prices = items.map(x => Number(x.price));
 
-      const canvas = document.getElementById("priceChart");
-      const ctx = canvas.getContext("2d");
+    const ctx = document.getElementById("priceChart").getContext("2d");
 
-      new Chart(ctx, {
+    if (!chart) {
+      chart = new Chart(ctx, {
         type: "line",
         data: {
           labels,
           datasets: [{
-            label: "BTC Price (KRW)",
+            label: `${market} price`,
             data: prices,
             borderWidth: 2,
-            pointRadius: 3
+            pointRadius: 0,
+            tension: 0.25
           }]
         },
         options: {
-          responsive: false,
+          responsive: true,
+          animation: false,
           scales: {
-            y: { beginAtZero: false }
+            y: {
+              ticks: {
+                callback: (v) => Number(v).toLocaleString()
+              }
+            }
+          },
+          plugins: {
+            legend: { display: true }
           }
         }
       });
-
-      debug("✅ Chart rendered.");
+      return;
     }
 
-    loadHistory();
-  </script>
+    // ✅ 핵심: 기존 차트 데이터만 갱신
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = prices;
+    chart.update();
+  }
+
+  async function refreshOnce() {
+    const items = await fetchHistory();
+    if (!items) return;
+
+    // 너무 많아지면 최근 N개만 (원하면 숫자 바꿔도 됨)
+    const N = 60;
+    const sliced = items.length > N ? items.slice(items.length - N) : items;
+
+    buildOrUpdateChart(sliced);
+
+    document.getElementById("lastUpdated").textContent =
+      `Last updated: ${new Date().toLocaleTimeString()}`;
+  }
+
+  // 1) 최초 1회 로드
+  refreshOnce();
+
+  // 2) ✅ 자동 갱신: 3초마다 (원하면 1000~10000 사이로 조절)
+  setInterval(refreshOnce, 3000);
+</script>
 </body>
 </html>
