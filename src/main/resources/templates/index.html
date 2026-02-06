@@ -56,6 +56,7 @@
     <h2 style="margin:0;">KRW-BTC Price History</h2>
     <div class="badge" id="trendBadge">Trend: -</div>
     <div class="badge" id="lastBadge">Last: -</div>
+    <div class="badge" id="lrBadge">LR: -</div>
 </div>
 
 <div class="chart-wrap">
@@ -65,151 +66,234 @@
 <div id="debug">Loading...</div>
 
 <script>
-const MARKET = "KRW-BTC";
-const API_URL = `/api/market/upbit/history?market=${MARKET}`;
-const REFRESH_MS = 3000;
-const WINDOW_MIN = 10;
+  const MARKET = "KRW-BTC";
+  const API_URL = `/api/market/upbit/history?market=${MARKET}`;
+  const REFRESH_MS = 3000;
+  const WINDOW_MIN = 10;     // 최근 10분만 보여주기
+  const LR_WINDOW = 120;     // 선형회귀 계산에 쓸 최근 포인트 개수(너무 크면 둔해짐)
 
-let chart;
+  let chart;
 
-/* ================= utils ================= */
+  /* ================= utils ================= */
 
-function formatKST(d) {
-  return d.toLocaleTimeString("ko-KR", { hour12: false });
-}
-
-function formatKRW(n) {
-  return Number(n).toLocaleString("ko-KR");
-}
-
-function setDebug(lines) {
-  document.getElementById("debug").textContent = lines.join("\n");
-}
-
-function movingAverage(points, window) {
-  return points.map((p, i) => {
-    if (i < window - 1) return { x: p.x, y: null };
-    const slice = points.slice(i - window + 1, i + 1);
-    const avg = slice.reduce((s, v) => s + v.y, 0) / window;
-    return { x: p.x, y: avg };
-  });
-}
-
-/* ================= chart ================= */
-
-function ensureChart() {
-  const ctx = document.getElementById("priceChart").getContext("2d");
-
-  chart = new Chart(ctx, {
-    type: "line",
-    data: {
-      datasets: [
-        {
-          label: "BTC Price",
-          data: [],
-          parsing: false,
-          pointRadius: 0,
-          borderWidth: 2,
-          tension: 0.2,
-          borderColor: "#4CAF50",
-        },
-        {
-          label: "MA5",
-          data: [],
-          parsing: false,
-          pointRadius: 0,
-          borderWidth: 1.5,
-          borderColor: "#ff9800"
-        },
-        {
-          label: "MA20",
-          data: [],
-          parsing: false,
-          pointRadius: 0,
-          borderWidth: 1.5,
-          borderColor: "#2196f3"
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      scales: {
-        x: {
-          type: "time",
-          time: {
-            unit: "second",
-            displayFormats: { second: "HH:mm:ss" }
-          },
-          ticks: { maxTicksLimit: 8 }
-        },
-        y: {
-          beginAtZero: false
-        }
-      }
-    }
-  });
-}
-
-/* ================= data ================= */
-
-async function loadHistory() {
-  const debug = [];
-  debug.push(`Fetching: ${API_URL}`);
-
-  const res = await fetch(API_URL, { cache: "no-store" });
-  const raw = await res.text();
-  debug.push(`HTTP ${res.status}`);
-
-  if (!res.ok) {
-    debug.push(raw.slice(0, 200));
-    setDebug(debug);
-    return;
+  function formatKST(d) {
+    return d.toLocaleTimeString("ko-KR", { hour12: false });
   }
 
-  const data = JSON.parse(raw);
-  const list = Array.isArray(data) ? data : [];
+  function formatKRW(n) {
+    return Number(n).toLocaleString("ko-KR");
+  }
 
-  const points = list
-    .map(p => ({
-      x: new Date(p.createdAt ?? p.fetchedAt),
-      y: Number(p.price)
-    }))
-    .filter(p => !isNaN(p.y));
+  function setDebug(lines) {
+    document.getElementById("debug").textContent = lines.join("\n");
+  }
 
-  if (!chart) ensureChart();
+  function movingAverage(points, window) {
+    return points.map((p, i) => {
+      if (i < window - 1) return { x: p.x, y: null };
+      const slice = points.slice(i - window + 1, i + 1);
+      const avg = slice.reduce((s, v) => s + v.y, 0) / window;
+      return { x: p.x, y: avg };
+    });
+  }
 
-  const now = Date.now();
-  const min = now - WINDOW_MIN * 60 * 1000;
+  // points: [{x: Date, y: number}] -> 최근 LR_WINDOW개로 선형회귀 후 2점짜리 추세선 반환
+  function linearRegressionLine(points, takeN, minTimeMs, maxTimeMs) {
+    const usable = points
+      .filter(p => p.x && typeof p.y === "number" && !Number.isNaN(p.y))
+      .slice(-takeN);
 
-  chart.options.scales.x.min = min;
-  chart.options.scales.x.max = now;
+    if (usable.length < 2) return { line: [], slopePerMin: 0, changePct: 0 };
 
-  chart.data.datasets[0].data = points;
-  chart.data.datasets[1].data = movingAverage(points, 5);
-  chart.data.datasets[2].data = movingAverage(points, 20);
+    const t0 = usable[0].x.getTime();
 
-  chart.update("none");
+    let sumX = 0, sumY = 0, sumXX = 0, sumXY = 0;
+    const n = usable.length;
 
-  const last = points.at(-1);
-  document.getElementById("lastBadge").textContent =
-    `Last: ${formatKRW(last.y)} (${formatKST(last.x)})`;
+    for (const p of usable) {
+      const x = (p.x.getTime() - t0) / 60000.0; // minutes
+      const y = p.y;
+      sumX += x;
+      sumY += y;
+      sumXX += x * x;
+      sumXY += x * y;
+    }
 
-  const first = points.find(p => p.x.getTime() >= min);
-  const pct = ((last.y - first.y) / first.y) * 100;
-  const dir = pct > 0 ? "↑ 상승" : "↓ 하락";
+    const denom = (n * sumXX - sumX * sumX);
+    const b = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom; // slope per minute
+    const a = (sumY - b * sumX) / n;
 
-  document.getElementById("trendBadge").textContent =
-    `Trend: ${dir} (${pct.toFixed(3)}%)`;
+    // 화면에 보이는 범위(min/max) 기준으로 2점 생성 (그래야 "최근 10분" 축에 딱 맞게 보임)
+    const xStart = (minTimeMs - t0) / 60000.0;
+    const xEnd   = (maxTimeMs - t0) / 60000.0;
 
-  debug.push(`Loaded ${points.length} points`);
-  setDebug(debug);
-}
+    const yStart = a + b * xStart;
+    const yEnd   = a + b * xEnd;
 
-ensureChart();
-loadHistory();
-setInterval(loadHistory, REFRESH_MS);
+    const changePct = yStart === 0 ? 0 : ((yEnd - yStart) / yStart) * 100.0;
+
+    return {
+      line: [
+        { x: new Date(minTimeMs), y: yStart },
+        { x: new Date(maxTimeMs), y: yEnd }
+      ],
+      slopePerMin: b,
+      changePct
+    };
+  }
+
+  /* ================= chart ================= */
+
+  function ensureChart() {
+    const ctx = document.getElementById("priceChart").getContext("2d");
+
+    chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        datasets: [
+          {
+            label: "BTC Price",
+            data: [],
+            parsing: false,
+            pointRadius: 0,
+            borderWidth: 2,
+            tension: 0.2,
+            borderColor: "#4CAF50",
+          },
+          {
+            label: "MA5",
+            data: [],
+            parsing: false,
+            pointRadius: 0,
+            borderWidth: 1.5,
+            borderColor: "#ff9800"
+          },
+          {
+            label: "MA20",
+            data: [],
+            parsing: false,
+            pointRadius: 0,
+            borderWidth: 1.5,
+            borderColor: "#2196f3"
+          },
+          {
+            label: "LR Trend",
+            data: [],
+            parsing: false,
+            pointRadius: 0,
+            borderWidth: 2,
+            borderDash: [6, 6],
+            borderColor: "#9c27b0"
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        scales: {
+          x: {
+            type: "time",
+            time: {
+              unit: "second",
+              displayFormats: { second: "HH:mm:ss" }
+            },
+            ticks: { maxTicksLimit: 8 }
+          },
+          y: { beginAtZero: false }
+        }
+      }
+    });
+  }
+
+  /* ================= data ================= */
+
+  async function loadHistory() {
+    const debug = [];
+    debug.push(`Fetching: ${API_URL}`);
+
+    const res = await fetch(API_URL, { cache: "no-store" });
+    const raw = await res.text();
+    debug.push(`HTTP ${res.status}`);
+
+    if (!res.ok) {
+      debug.push(raw.slice(0, 200));
+      setDebug(debug);
+      return;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      debug.push("JSON parse failed");
+      debug.push(raw.slice(0, 200));
+      setDebug(debug);
+      return;
+    }
+
+    const list = Array.isArray(data) ? data : [];
+
+    const points = list
+      .map(p => ({
+        x: new Date(p.createdAt ?? p.fetchedAt),
+        y: Number(p.price)
+      }))
+      .filter(p => p.x instanceof Date && !Number.isNaN(p.x.getTime()) && !Number.isNaN(p.y));
+
+    if (!chart) ensureChart();
+
+    const now = Date.now();
+    const min = now - WINDOW_MIN * 60 * 1000;
+
+    // x축 범위 고정(최근 10분)
+    chart.options.scales.x.min = min;
+    chart.options.scales.x.max = now;
+
+    // 가격 & MA
+    chart.data.datasets[0].data = points;
+    chart.data.datasets[1].data = movingAverage(points, 5);
+    chart.data.datasets[2].data = movingAverage(points, 20);
+
+    // 배지(Last / 단순 구간 상승하락)
+    if (points.length === 0) {
+      document.getElementById("lastBadge").textContent = "Last: -";
+      document.getElementById("trendBadge").textContent = "Trend: -";
+      document.getElementById("lrBadge").textContent = "LR: -";
+      debug.push("OK but empty data");
+      setDebug(debug);
+      return;
+    }
+
+    const last = points.at(-1);
+    document.getElementById("lastBadge").textContent =
+      `Last: ${formatKRW(last.y)} (${formatKST(last.x)})`;
+
+    const firstInWindow = points.find(p => p.x.getTime() >= min) ?? points[0];
+    const pct = ((last.y - firstInWindow.y) / firstInWindow.y) * 100;
+    const dir = pct >= 0 ? "↑ 상승" : "↓ 하락";
+    document.getElementById("trendBadge").textContent =
+      `Trend: ${dir} (${pct.toFixed(3)}%)`;
+
+    // ✅ 선형회귀 추세선 (최근 LR_WINDOW개 사용, 화면 범위(min~now)에 맞춰 2점 생성)
+    const lr = linearRegressionLine(points, LR_WINDOW, min, now);
+    chart.data.datasets[3].data = lr.line;
+
+    const lrDir = lr.changePct >= 0 ? "↑" : "↓";
+    document.getElementById("lrBadge").textContent =
+      `LR: ${lrDir} ${lr.changePct.toFixed(3)}% (slope/min=${lr.slopePerMin.toFixed(2)})`;
+
+    chart.update("none");
+
+    debug.push(`Loaded ${points.length} points`);
+    debug.push(`Window=${WINDOW_MIN}min, LR_WINDOW=${LR_WINDOW}pts`);
+    setDebug(debug);
+  }
+
+  ensureChart();
+  loadHistory();
+  setInterval(loadHistory, REFRESH_MS);
 </script>
+
 </body>
 </html>
