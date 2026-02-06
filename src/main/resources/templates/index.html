@@ -29,12 +29,12 @@
     .chart-wrap {
       max-width: 980px;
       width: 100%;
-      height: 420px;      /* ✅ 높이 고정: 브라우저가 길어지는 문제 방지 */
-      position: relative; /* Chart.js responsive에서 권장 */
+      height: 420px;
+      position: relative;
     }
     canvas {
       width: 100% !important;
-      height: 100% !important; /* ✅ 컨테이너 높이를 그대로 사용 */
+      height: 100% !important;
       display: block;
     }
     #debug {
@@ -53,7 +53,7 @@
 <body>
 
 <div class="row">
-    <h2 style="margin: 0;">KRW-BTC Price History</h2>
+    <h2 style="margin:0;">KRW-BTC Price History</h2>
     <div class="badge" id="trendBadge">Trend: -</div>
     <div class="badge" id="lastBadge">Last: -</div>
 </div>
@@ -65,176 +65,151 @@
 <div id="debug">Loading...</div>
 
 <script>
-    const MARKET = "KRW-BTC";
-    const API_URL = `/api/market/upbit/history?market=${encodeURIComponent(MARKET)}`;
+const MARKET = "KRW-BTC";
+const API_URL = `/api/market/upbit/history?market=${MARKET}`;
+const REFRESH_MS = 3000;
+const WINDOW_MIN = 10;
 
-    const REFRESH_MS = 3000;
-    const WINDOW_MIN = 10; // ✅ 최근 10분만 화면에 고정 표시
+let chart;
 
-    let chart;
+/* ================= utils ================= */
 
-    function formatKST(isoOrDate) {
-      const d = (isoOrDate instanceof Date) ? isoOrDate : new Date(isoOrDate);
-      return d.toLocaleTimeString("ko-KR", { hour12: false });
-    }
+function formatKST(d) {
+  return d.toLocaleTimeString("ko-KR", { hour12: false });
+}
 
-    function formatKRW(n) {
-      try { return Number(n).toLocaleString("ko-KR"); }
-      catch { return String(n); }
-    }
+function formatKRW(n) {
+  return Number(n).toLocaleString("ko-KR");
+}
 
-    function setDebug(lines) {
-      document.getElementById("debug").textContent = lines.join("\n");
-    }
+function setDebug(lines) {
+  document.getElementById("debug").textContent = lines.join("\n");
+}
 
-    function calcTrend(points) {
-      // points: [{x:Date, y:number}]
-      if (!points || points.length < 2) return { pct: 0, dir: "-", label: "데이터 부족" };
+function movingAverage(points, window) {
+  return points.map((p, i) => {
+    if (i < window - 1) return { x: p.x, y: null };
+    const slice = points.slice(i - window + 1, i + 1);
+    const avg = slice.reduce((s, v) => s + v.y, 0) / window;
+    return { x: p.x, y: avg };
+  });
+}
 
-      const first = points[0].y;
-      const last  = points[points.length - 1].y;
-      if (!first || !isFinite(first) || !isFinite(last)) return { pct: 0, dir: "-", label: "데이터 오류" };
+/* ================= chart ================= */
 
-      const pct = ((last - first) / first) * 100;
-      const dir = pct > 0 ? "↑" : (pct < 0 ? "↓" : "→");
-      const label = pct > 0 ? "상승" : (pct < 0 ? "하락" : "보합");
-      return { pct, dir, label };
-    }
+function ensureChart() {
+  const ctx = document.getElementById("priceChart").getContext("2d");
 
-    function ensureChart() {
-      const ctx = document.getElementById("priceChart").getContext("2d");
-
-      chart = new Chart(ctx, {
-        type: "line",
-        data: {
-          datasets: [{
-            label: "BTC (KRW)",
-            data: [],           // [{x: Date, y: number}]
-            parsing: false,     // x/y 직접 제공
-            pointRadius: 0,
-            borderWidth: 2,
-            tension: 0.2
-          }]
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      datasets: [
+        {
+          label: "BTC Price",
+          data: [],
+          parsing: false,
+          pointRadius: 0,
+          borderWidth: 2,
+          tension: 0.2,
+          borderColor: "#4CAF50",
         },
-        options: {
-          animation: false,
-          responsive: true,
-          maintainAspectRatio: false, // ✅ 컨테이너 높이 고정
-          scales: {
-            x: {
-              type: "time",
-              time: {
-                unit: "second",
-                displayFormats: { second: "HH:mm:ss" }
-              },
-              ticks: {
-                autoSkip: true,
-                maxTicksLimit: 8,
-                maxRotation: 0
-              }
-            },
-            y: {
-              beginAtZero: false
-            }
-          },
-          plugins: {
-            legend: { display: true }
-          }
+        {
+          label: "MA5",
+          data: [],
+          parsing: false,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderColor: "#ff9800"
+        },
+        {
+          label: "MA20",
+          data: [],
+          parsing: false,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderColor: "#2196f3"
         }
-      });
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: {
+          type: "time",
+          time: {
+            unit: "second",
+            displayFormats: { second: "HH:mm:ss" }
+          },
+          ticks: { maxTicksLimit: 8 }
+        },
+        y: {
+          beginAtZero: false
+        }
+      }
     }
+  });
+}
 
-    async function loadHistory() {
-      const startedAt = Date.now();
+/* ================= data ================= */
 
-      const debugLines = [];
-      debugLines.push(`Fetching: ${API_URL}`);
+async function loadHistory() {
+  const debug = [];
+  debug.push(`Fetching: ${API_URL}`);
 
-      let res, rawText, data;
-      try {
-        res = await fetch(API_URL, { cache: "no-store" });
-        rawText = await res.text();
-      } catch (e) {
-        debugLines.push(`❌ fetch failed: ${String(e)}`);
-        setDebug(debugLines);
-        return;
-      }
+  const res = await fetch(API_URL, { cache: "no-store" });
+  const raw = await res.text();
+  debug.push(`HTTP ${res.status}`);
 
-      debugLines.push(`HTTP ${res.status}`);
+  if (!res.ok) {
+    debug.push(raw.slice(0, 200));
+    setDebug(debug);
+    return;
+  }
 
-      if (!res.ok) {
-        debugLines.push(`Raw response (first 200 chars): ${rawText.slice(0, 200)}`);
-        setDebug(debugLines);
-        return;
-      }
+  const data = JSON.parse(raw);
+  const list = Array.isArray(data) ? data : [];
 
-      try {
-        data = JSON.parse(rawText);
-      } catch (e) {
-        debugLines.push("❌ JSON parse failed");
-        debugLines.push(`Raw response (first 200 chars): ${rawText.slice(0, 200)}`);
-        setDebug(debugLines);
-        return;
-      }
+  const points = list
+    .map(p => ({
+      x: new Date(p.createdAt ?? p.fetchedAt),
+      y: Number(p.price)
+    }))
+    .filter(p => !isNaN(p.y));
 
-      const list = Array.isArray(data) ? data : (data.items ?? []);
-      if (!Array.isArray(list)) {
-        debugLines.push("❌ Response is not an array.");
-        setDebug(debugLines);
-        return;
-      }
+  if (!chart) ensureChart();
 
-      // 원본을 points로 변환
-      const points = list
-        .map(p => {
-          const t = p.createdAt ?? p.fetchedAt;
-          const priceNum = Number(p.price);
-          if (!t || Number.isNaN(priceNum)) return null;
-          return { x: new Date(t), y: priceNum };
-        })
-        .filter(Boolean);
+  const now = Date.now();
+  const min = now - WINDOW_MIN * 60 * 1000;
 
-      if (!chart) ensureChart();
+  chart.options.scales.x.min = min;
+  chart.options.scales.x.max = now;
 
-      // ✅ 화면 범위를 최근 WINDOW_MIN분으로 고정
-      const max = Date.now();
-      const min = max - WINDOW_MIN * 60 * 1000;
-      chart.options.scales.x.min = min;
-      chart.options.scales.x.max = max;
+  chart.data.datasets[0].data = points;
+  chart.data.datasets[1].data = movingAverage(points, 5);
+  chart.data.datasets[2].data = movingAverage(points, 20);
 
-      // 데이터는 전체 넣되, 화면은 min/max로 잘려 보임
-      chart.data.datasets[0].data = points;
-      chart.update("none");
+  chart.update("none");
 
-      // 화면 구간(최근 WINDOW_MIN분)만 따로 뽑아서 Trend/Last 계산
-      const pointsWindow = points.filter(p => p.x.getTime() >= min && p.x.getTime() <= max);
+  const last = points.at(-1);
+  document.getElementById("lastBadge").textContent =
+    `Last: ${formatKRW(last.y)} (${formatKST(last.x)})`;
 
-      if (pointsWindow.length === 0) {
-        document.getElementById("trendBadge").textContent = "Trend: - (empty)";
-        document.getElementById("lastBadge").textContent = "Last: -";
-        debugLines.push("OK but empty data (window)");
-        setDebug(debugLines);
-        return;
-      }
+  const first = points.find(p => p.x.getTime() >= min);
+  const pct = ((last.y - first.y) / first.y) * 100;
+  const dir = pct > 0 ? "↑ 상승" : "↓ 하락";
 
-      const trend = calcTrend(pointsWindow);
-      const lastPoint = pointsWindow[pointsWindow.length - 1];
+  document.getElementById("trendBadge").textContent =
+    `Trend: ${dir} (${pct.toFixed(3)}%)`;
 
-      document.getElementById("trendBadge").textContent =
-        `Trend: ${trend.dir} ${trend.label} (${trend.pct.toFixed(3)}%)`;
+  debug.push(`Loaded ${points.length} points`);
+  setDebug(debug);
+}
 
-      document.getElementById("lastBadge").textContent =
-        `Last: ${formatKRW(lastPoint.y)} (${formatKST(lastPoint.x)})`;
-
-      const took = Date.now() - startedAt;
-      debugLines.push(`✅ Loaded total=${points.length}, window=${pointsWindow.length}, last=${formatKST(lastPoint.x)}, took=${took}ms`);
-      setDebug(debugLines);
-    }
-
-    // start
-    ensureChart();
-    loadHistory();
-    setInterval(loadHistory, REFRESH_MS);
-  </script>
+ensureChart();
+loadHistory();
+setInterval(loadHistory, REFRESH_MS);
+</script>
 </body>
 </html>
