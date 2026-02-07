@@ -8,46 +8,13 @@
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
 
     <style>
-    body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      padding: 16px;
-      margin: 0;
-    }
-    .row {
-      display: flex;
-      gap: 12px;
-      align-items: baseline;
-      flex-wrap: wrap;
-      margin-bottom: 10px;
-    }
-    .badge {
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: #f2f2f2;
-      font-size: 14px;
-    }
-    .chart-wrap {
-      max-width: 980px;
-      width: 100%;
-      height: 420px;
-      position: relative;
-    }
-    canvas {
-      width: 100% !important;
-      height: 100% !important;
-      display: block;
-    }
-    #debug {
-      margin-top: 10px;
-      white-space: pre-wrap;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 12px;
-      background: #0b1020;
-      color: #d6e1ff;
-      padding: 10px;
-      border-radius: 8px;
-      max-width: 980px;
-    }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; margin: 0; }
+    .row { display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; margin-bottom:10px; }
+    .badge { padding:6px 10px; border-radius:999px; background:#f2f2f2; font-size:14px; }
+    .chart-wrap { max-width:980px; width:100%; height:420px; position:relative; }
+    canvas { width:100% !important; height:100% !important; display:block; }
+    #debug { margin-top:10px; white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+             font-size:12px; background:#0b1020; color:#d6e1ff; padding:10px; border-radius:8px; max-width:980px; }
   </style>
 </head>
 <body>
@@ -56,7 +23,6 @@
     <h2 style="margin:0;">KRW-BTC Price History</h2>
     <div class="badge" id="trendBadge">Trend: -</div>
     <div class="badge" id="lastBadge">Last: -</div>
-    <div class="badge" id="lrBadge">LR: -</div>
 </div>
 
 <div class="chart-wrap">
@@ -67,86 +33,48 @@
 
 <script>
   const MARKET = "KRW-BTC";
-  const API_URL = `/api/market/upbit/history?market=${MARKET}`;
-  const REFRESH_MS = 3000;
-  const WINDOW_MIN = 10;     // 최근 10분만 보여주기
-  const LR_WINDOW = 120;     // 선형회귀 계산에 쓸 최근 포인트 개수(너무 크면 둔해짐)
+  const HISTORY_URL = `/api/market/upbit/history?market=${MARKET}`;
+  const STREAM_URL  = `/api/market/upbit/stream?market=${MARKET}`;
+
+  const WINDOW_MIN = 10;              // 최근 10분만 표시
+  const MA_SHORT = 5;
+  const MA_LONG  = 20;
 
   let chart;
+  let points = []; // [{x: Date, y: number}]
 
   /* ================= utils ================= */
 
   function formatKST(d) {
     return d.toLocaleTimeString("ko-KR", { hour12: false });
   }
-
   function formatKRW(n) {
     return Number(n).toLocaleString("ko-KR");
   }
-
   function setDebug(lines) {
     document.getElementById("debug").textContent = lines.join("\n");
   }
 
-  function movingAverage(points, window) {
-    return points.map((p, i) => {
+  function movingAverage(srcPoints, window) {
+    return srcPoints.map((p, i) => {
       if (i < window - 1) return { x: p.x, y: null };
-      const slice = points.slice(i - window + 1, i + 1);
+      const slice = srcPoints.slice(i - window + 1, i + 1);
       const avg = slice.reduce((s, v) => s + v.y, 0) / window;
       return { x: p.x, y: avg };
     });
   }
 
-  // points: [{x: Date, y: number}] -> 최근 LR_WINDOW개로 선형회귀 후 2점짜리 추세선 반환
-  function linearRegressionLine(points, takeN, minTimeMs, maxTimeMs) {
-    const usable = points
-      .filter(p => p.x && typeof p.y === "number" && !Number.isNaN(p.y))
-      .slice(-takeN);
-
-    if (usable.length < 2) return { line: [], slopePerMin: 0, changePct: 0 };
-
-    const t0 = usable[0].x.getTime();
-
-    let sumX = 0, sumY = 0, sumXX = 0, sumXY = 0;
-    const n = usable.length;
-
-    for (const p of usable) {
-      const x = (p.x.getTime() - t0) / 60000.0; // minutes
-      const y = p.y;
-      sumX += x;
-      sumY += y;
-      sumXX += x * x;
-      sumXY += x * y;
-    }
-
-    const denom = (n * sumXX - sumX * sumX);
-    const b = denom === 0 ? 0 : (n * sumXY - sumX * sumY) / denom; // slope per minute
-    const a = (sumY - b * sumX) / n;
-
-    // 화면에 보이는 범위(min/max) 기준으로 2점 생성 (그래야 "최근 10분" 축에 딱 맞게 보임)
-    const xStart = (minTimeMs - t0) / 60000.0;
-    const xEnd   = (maxTimeMs - t0) / 60000.0;
-
-    const yStart = a + b * xStart;
-    const yEnd   = a + b * xEnd;
-
-    const changePct = yStart === 0 ? 0 : ((yEnd - yStart) / yStart) * 100.0;
-
-    return {
-      line: [
-        { x: new Date(minTimeMs), y: yStart },
-        { x: new Date(maxTimeMs), y: yEnd }
-      ],
-      slopePerMin: b,
-      changePct
-    };
+  function trimWindow() {
+    const now = Date.now();
+    const min = now - WINDOW_MIN * 60 * 1000;
+    points = points.filter(p => p.x.getTime() >= min);
+    return { now, min };
   }
 
   /* ================= chart ================= */
 
   function ensureChart() {
     const ctx = document.getElementById("priceChart").getContext("2d");
-
     chart = new Chart(ctx, {
       type: "line",
       data: {
@@ -158,7 +86,7 @@
             pointRadius: 0,
             borderWidth: 2,
             tension: 0.2,
-            borderColor: "#4CAF50",
+            borderColor: "#22c55e" // 초록(잘 보임)
           },
           {
             label: "MA5",
@@ -166,7 +94,7 @@
             parsing: false,
             pointRadius: 0,
             borderWidth: 1.5,
-            borderColor: "#ff9800"
+            borderColor: "#f59e0b" // 주황
           },
           {
             label: "MA20",
@@ -174,16 +102,7 @@
             parsing: false,
             pointRadius: 0,
             borderWidth: 1.5,
-            borderColor: "#2196f3"
-          },
-          {
-            label: "LR Trend",
-            data: [],
-            parsing: false,
-            pointRadius: 0,
-            borderWidth: 2,
-            borderDash: [6, 6],
-            borderColor: "#9c27b0"
+            borderColor: "#3b82f6" // 파랑
           }
         ]
       },
@@ -194,10 +113,7 @@
         scales: {
           x: {
             type: "time",
-            time: {
-              unit: "second",
-              displayFormats: { second: "HH:mm:ss" }
-            },
+            time: { unit: "second", displayFormats: { second: "HH:mm:ss" } },
             ticks: { maxTicksLimit: 8 }
           },
           y: { beginAtZero: false }
@@ -206,13 +122,38 @@
     });
   }
 
-  /* ================= data ================= */
+  function render() {
+    const { now, min } = trimWindow();
 
-  async function loadHistory() {
+    chart.options.scales.x.min = min;
+    chart.options.scales.x.max = now;
+
+    chart.data.datasets[0].data = points;
+    chart.data.datasets[1].data = movingAverage(points, MA_SHORT);
+    chart.data.datasets[2].data = movingAverage(points, MA_LONG);
+
+    chart.update("none");
+
+    if (points.length === 0) return;
+
+    const last = points.at(-1);
+    document.getElementById("lastBadge").textContent =
+      `Last: ${formatKRW(last.y)} (${formatKST(last.x)})`;
+
+    const first = points.at(0);
+    const pct = ((last.y - first.y) / first.y) * 100;
+    const dir = pct > 0 ? "↑ 상승" : "↓ 하락";
+    document.getElementById("trendBadge").textContent =
+      `Trend: ${dir} (${pct.toFixed(3)}%)`;
+  }
+
+  /* ================= init: history then SSE ================= */
+
+  async function loadInitialHistory() {
     const debug = [];
-    debug.push(`Fetching: ${API_URL}`);
+    debug.push(`Initial fetch: ${HISTORY_URL}`);
 
-    const res = await fetch(API_URL, { cache: "no-store" });
+    const res = await fetch(HISTORY_URL, { cache: "no-store" });
     const raw = await res.text();
     debug.push(`HTTP ${res.status}`);
 
@@ -222,77 +163,62 @@
       return;
     }
 
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch (e) {
-      debug.push("JSON parse failed");
-      debug.push(raw.slice(0, 200));
-      setDebug(debug);
-      return;
-    }
+    const list = JSON.parse(raw);
+    const arr = Array.isArray(list) ? list : [];
 
-    const list = Array.isArray(data) ? data : [];
+    points = arr
+      .map(p => {
+        const t = p.createdAt ?? p.fetchedAt;
+        return { x: new Date(t), y: Number(p.price) };
+      })
+      .filter(p => p.x.toString() !== "Invalid Date" && !isNaN(p.y));
 
-    const points = list
-      .map(p => ({
-        x: new Date(p.createdAt ?? p.fetchedAt),
-        y: Number(p.price)
-      }))
-      .filter(p => p.x instanceof Date && !Number.isNaN(p.x.getTime()) && !Number.isNaN(p.y));
-
-    if (!chart) ensureChart();
-
-    const now = Date.now();
-    const min = now - WINDOW_MIN * 60 * 1000;
-
-    // x축 범위 고정(최근 10분)
-    chart.options.scales.x.min = min;
-    chart.options.scales.x.max = now;
-
-    // 가격 & MA
-    chart.data.datasets[0].data = points;
-    chart.data.datasets[1].data = movingAverage(points, 5);
-    chart.data.datasets[2].data = movingAverage(points, 20);
-
-    // 배지(Last / 단순 구간 상승하락)
-    if (points.length === 0) {
-      document.getElementById("lastBadge").textContent = "Last: -";
-      document.getElementById("trendBadge").textContent = "Trend: -";
-      document.getElementById("lrBadge").textContent = "LR: -";
-      debug.push("OK but empty data");
-      setDebug(debug);
-      return;
-    }
-
-    const last = points.at(-1);
-    document.getElementById("lastBadge").textContent =
-      `Last: ${formatKRW(last.y)} (${formatKST(last.x)})`;
-
-    const firstInWindow = points.find(p => p.x.getTime() >= min) ?? points[0];
-    const pct = ((last.y - firstInWindow.y) / firstInWindow.y) * 100;
-    const dir = pct >= 0 ? "↑ 상승" : "↓ 하락";
-    document.getElementById("trendBadge").textContent =
-      `Trend: ${dir} (${pct.toFixed(3)}%)`;
-
-    // ✅ 선형회귀 추세선 (최근 LR_WINDOW개 사용, 화면 범위(min~now)에 맞춰 2점 생성)
-    const lr = linearRegressionLine(points, LR_WINDOW, min, now);
-    chart.data.datasets[3].data = lr.line;
-
-    const lrDir = lr.changePct >= 0 ? "↑" : "↓";
-    document.getElementById("lrBadge").textContent =
-      `LR: ${lrDir} ${lr.changePct.toFixed(3)}% (slope/min=${lr.slopePerMin.toFixed(2)})`;
-
-    chart.update("none");
-
-    debug.push(`Loaded ${points.length} points`);
-    debug.push(`Window=${WINDOW_MIN}min, LR_WINDOW=${LR_WINDOW}pts`);
+    debug.push(`Loaded history points: ${points.length}`);
     setDebug(debug);
+
+    render();
   }
 
+  function startSse() {
+    const debug = [];
+    debug.push(`SSE connect: ${STREAM_URL}`);
+    setDebug(debug);
+
+    const es = new EventSource(STREAM_URL);
+
+    es.addEventListener("ping", (e) => {
+      setDebug([`SSE connected (ping): ${e.data}`]);
+    });
+
+    es.addEventListener("tick", (e) => {
+      // tick: { market, price, createdAt }
+      const tick = JSON.parse(e.data);
+      const x = new Date(tick.createdAt);
+      const y = Number(tick.price);
+
+      if (x.toString() === "Invalid Date" || isNaN(y)) return;
+
+      points.push({ x, y });
+      render();
+
+      setDebug([
+        `SSE OK`,
+        `tick market=${tick.market}`,
+        `tick price=${formatKRW(y)}`,
+        `tick time=${formatKST(x)}`,
+        `points in window=${points.length}`
+      ]);
+    });
+
+    es.onerror = () => {
+      setDebug([`SSE error - 연결이 끊겼거나 서버가 내려갔을 수 있음`]);
+      // 브라우저가 자동 재연결 시도함
+    };
+  }
+
+  // boot
   ensureChart();
-  loadHistory();
-  setInterval(loadHistory, REFRESH_MS);
+  loadInitialHistory().then(startSse);
 </script>
 
 </body>

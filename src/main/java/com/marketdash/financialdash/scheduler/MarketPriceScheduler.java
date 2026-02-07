@@ -13,8 +13,8 @@ public class MarketPriceScheduler {
         this.marketService = marketService;
     }
 
-    @Scheduled(fixedRate = 5000) // 5초마다
-    public void saveBtcPrice() {
+    @Scheduled(fixedDelay = 3000) // 3초
+    public void fetch() {
         marketService.fetchAndSaveUpbitPrice("KRW-BTC");
     }
 }
