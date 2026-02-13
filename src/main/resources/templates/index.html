@@ -9,12 +9,16 @@
 
     <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; margin: 0; }
-    .row { display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; margin-bottom:10px; }
-    .badge { padding:6px 10px; border-radius:999px; background:#f2f2f2; font-size:14px; }
-    .chart-wrap { max-width:980px; width:100%; height:420px; position:relative; }
-    canvas { width:100% !important; height:100% !important; display:block; }
-    #debug { margin-top:10px; white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-             font-size:12px; background:#0b1020; color:#d6e1ff; padding:10px; border-radius:8px; max-width:980px; }
+    .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 10px; }
+    .badge { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; font-size: 14px; }
+    .chart-wrap { max-width: 980px; width: 100%; height: 420px; position: relative; }
+    canvas { width: 100% !important; height: 100% !important; display: block; }
+    #debug {
+      margin-top: 10px; white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; background: #0b1020; color: #d6e1ff;
+      padding: 10px; border-radius: 8px; max-width: 980px;
+    }
   </style>
 </head>
 <body>
@@ -29,197 +33,216 @@
     <canvas id="priceChart"></canvas>
 </div>
 
-<div id="debug">Loading...</div>
+<div id="debug">Connecting SSE...</div>
 
 <script>
-  const MARKET = "KRW-BTC";
-  const HISTORY_URL = `/api/market/upbit/history?market=${MARKET}`;
-  const STREAM_URL  = `/api/market/upbit/stream?market=${MARKET}`;
+/* ================= config ================= */
+const MARKET = "KRW-BTC";
+const SSE_URL = `/api/market/upbit/stream?market=${MARKET}`;
 
-  const WINDOW_MIN = 10;              // 최근 10분만 표시
-  const MA_SHORT = 5;
-  const MA_LONG  = 20;
+const WINDOW_MIN = 10;      // 최근 10분만 보여주기
+const MAX_POINTS = 1200;    // 메모리 보호(넉넉하게)
+const MA5 = 5;
+const MA20 = 20;
 
-  let chart;
-  let points = []; // [{x: Date, y: number}]
+/* ================= state ================= */
+let chart;
+let allPoints = []; // {x: Date, y: number}
+let debugLines = [];
 
-  /* ================= utils ================= */
+/* ================= utils ================= */
+function formatKST(d) {
+  return d.toLocaleTimeString("ko-KR", { hour12: false });
+}
+function formatKRW(n) {
+  return Number(n).toLocaleString("ko-KR");
+}
+function pushDebug(line) {
+  debugLines.push(line);
+  if (debugLines.length > 12) debugLines = debugLines.slice(-12);
+  document.getElementById("debug").textContent = debugLines.join("\n");
+}
+function movingAverage(points, window) {
+  // points: [{x,y}], y는 number
+  return points.map((p, i) => {
+    if (i < window - 1) return { x: p.x, y: null };
+    let sum = 0;
+    for (let k = i - window + 1; k <= i; k++) sum += points[k].y;
+    return { x: p.x, y: sum / window };
+  });
+}
 
-  function formatKST(d) {
-    return d.toLocaleTimeString("ko-KR", { hour12: false });
-  }
-  function formatKRW(n) {
-    return Number(n).toLocaleString("ko-KR");
-  }
-  function setDebug(lines) {
-    document.getElementById("debug").textContent = lines.join("\n");
-  }
-
-  function movingAverage(srcPoints, window) {
-    return srcPoints.map((p, i) => {
-      if (i < window - 1) return { x: p.x, y: null };
-      const slice = srcPoints.slice(i - window + 1, i + 1);
-      const avg = slice.reduce((s, v) => s + v.y, 0) / window;
-      return { x: p.x, y: avg };
-    });
-  }
-
-  function trimWindow() {
-    const now = Date.now();
-    const min = now - WINDOW_MIN * 60 * 1000;
-    points = points.filter(p => p.x.getTime() >= min);
-    return { now, min };
-  }
-
-  /* ================= chart ================= */
-
-  function ensureChart() {
-    const ctx = document.getElementById("priceChart").getContext("2d");
-    chart = new Chart(ctx, {
-      type: "line",
-      data: {
-        datasets: [
-          {
-            label: "BTC Price",
-            data: [],
-            parsing: false,
-            pointRadius: 0,
-            borderWidth: 2,
-            tension: 0.2,
-            borderColor: "#22c55e" // 초록(잘 보임)
-          },
-          {
-            label: "MA5",
-            data: [],
-            parsing: false,
-            pointRadius: 0,
-            borderWidth: 1.5,
-            borderColor: "#f59e0b" // 주황
-          },
-          {
-            label: "MA20",
-            data: [],
-            parsing: false,
-            pointRadius: 0,
-            borderWidth: 1.5,
-            borderColor: "#3b82f6" // 파랑
-          }
-        ]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        scales: {
-          x: {
-            type: "time",
-            time: { unit: "second", displayFormats: { second: "HH:mm:ss" } },
-            ticks: { maxTicksLimit: 8 }
-          },
-          y: { beginAtZero: false }
+/* ================= chart ================= */
+function ensureChart() {
+  const ctx = document.getElementById("priceChart").getContext("2d");
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      datasets: [
+        {
+          label: "BTC Price",
+          data: [],
+          parsing: false,
+          pointRadius: 0,
+          borderWidth: 2,
+          tension: 0.2,
+          borderColor: "#00E5FF" // 잘 보이는 시안 계열
+        },
+        {
+          label: "MA5",
+          data: [],
+          parsing: false,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          tension: 0.2,
+          borderColor: "#FFB300"
+        },
+        {
+          label: "MA20",
+          data: [],
+          parsing: false,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          tension: 0.2,
+          borderColor: "#7C4DFF"
         }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: {
+          type: "time",
+          time: { unit: "second", displayFormats: { second: "HH:mm:ss" } },
+          ticks: { maxTicksLimit: 8 }
+        },
+        y: { beginAtZero: false }
+      },
+      plugins: {
+        legend: { display: true }
       }
-    });
-  }
+    }
+  });
+}
 
-  function render() {
-    const { now, min } = trimWindow();
+/* ================= core ================= */
+function getWindowRange() {
+  const now = Date.now();
+  const min = now - WINDOW_MIN * 60 * 1000;
+  return { min, now };
+}
 
-    chart.options.scales.x.min = min;
-    chart.options.scales.x.max = now;
+function render() {
+  if (!chart) return;
 
-    chart.data.datasets[0].data = points;
-    chart.data.datasets[1].data = movingAverage(points, MA_SHORT);
-    chart.data.datasets[2].data = movingAverage(points, MA_LONG);
+  const { min, now } = getWindowRange();
 
+  // x축 window 고정
+  chart.options.scales.x.min = min;
+  chart.options.scales.x.max = now;
+
+  // windowPoints 만들기
+  const windowPoints = allPoints.filter(p => p.x.getTime() >= min);
+
+  // ✅ 데이터가 없으면 UI만 초기화하고 종료(여기서 last.y 에러 방지)
+  if (windowPoints.length === 0) {
+    chart.data.datasets[0].data = [];
+    chart.data.datasets[1].data = [];
+    chart.data.datasets[2].data = [];
     chart.update("none");
 
-    if (points.length === 0) return;
-
-    const last = points.at(-1);
-    document.getElementById("lastBadge").textContent =
-      `Last: ${formatKRW(last.y)} (${formatKST(last.x)})`;
-
-    const first = points.at(0);
-    const pct = ((last.y - first.y) / first.y) * 100;
-    const dir = pct > 0 ? "↑ 상승" : "↓ 하락";
-    document.getElementById("trendBadge").textContent =
-      `Trend: ${dir} (${pct.toFixed(3)}%)`;
+    document.getElementById("lastBadge").textContent = "Last: -";
+    document.getElementById("trendBadge").textContent = "Trend: -";
+    return;
   }
 
-  /* ================= init: history then SSE ================= */
+  // chart data 적용
+  chart.data.datasets[0].data = windowPoints;
+  chart.data.datasets[1].data = movingAverage(windowPoints, MA5);
+  chart.data.datasets[2].data = movingAverage(windowPoints, MA20);
+  chart.update("none");
 
-  async function loadInitialHistory() {
-    const debug = [];
-    debug.push(`Initial fetch: ${HISTORY_URL}`);
+  // UI 갱신
+  const last = windowPoints.at(-1);
+  if (!last || typeof last.y !== "number" || Number.isNaN(last.y)) return;
 
-    const res = await fetch(HISTORY_URL, { cache: "no-store" });
-    const raw = await res.text();
-    debug.push(`HTTP ${res.status}`);
+  document.getElementById("lastBadge").textContent =
+    `Last: ${formatKRW(last.y)} (${formatKST(last.x)})`;
 
-    if (!res.ok) {
-      debug.push(raw.slice(0, 200));
-      setDebug(debug);
-      return;
+  const first = windowPoints[0];
+  const pct = ((last.y - first.y) / first.y) * 100;
+  const dir = pct >= 0 ? "↑ 상승" : "↓ 하락";
+
+  document.getElementById("trendBadge").textContent =
+    `Trend: ${dir} (${pct.toFixed(3)}%)`;
+}
+
+function pushPointFromTick(tick) {
+  // ✅ tick 형태가 바뀌어도 최대한 자동으로 맞춤
+  // 가능한 키: createdAt / fetchedAt / time / timestamp
+  const t = tick?.createdAt ?? tick?.fetchedAt ?? tick?.time ?? tick?.timestamp;
+  // 가능한 키: price / tradePrice / value
+  const priceRaw = tick?.price ?? tick?.tradePrice ?? tick?.value;
+
+  const y = Number(priceRaw);
+  const x = t ? new Date(t) : null;
+
+  if (!x || Number.isNaN(y)) return;
+
+  allPoints.push({ x, y });
+
+  // 메모리 보호
+  if (allPoints.length > MAX_POINTS) {
+    allPoints = allPoints.slice(allPoints.length - MAX_POINTS);
+  }
+
+  // 너무 오래된건 미리 잘라내서 “쓸데없는 리셋 느낌/부하” 줄임
+  const { min } = getWindowRange();
+  while (allPoints.length && allPoints[0].x.getTime() < min - 60_000) {
+    // window보다 1분 더 여유두고 컷(MA 계산 안정)
+    allPoints.shift();
+  }
+
+  render();
+}
+
+/* ================= init ================= */
+ensureChart();
+pushDebug(`SSE: ${SSE_URL}`);
+pushDebug("Connecting...");
+
+const es = new EventSource(SSE_URL);
+
+es.addEventListener("ping", (e) => {
+  pushDebug(`✅ connected: ${e.data}`);
+});
+
+es.addEventListener("tick", (e) => {
+  try {
+    const tick = JSON.parse(e.data);
+    pushPointFromTick(tick);
+
+    const t = tick?.createdAt ?? tick?.fetchedAt ?? tick?.time ?? tick?.timestamp;
+    const p = tick?.price ?? tick?.tradePrice ?? tick?.value;
+
+    if (t && p != null) {
+      pushDebug(`tick ${formatKST(new Date(t))} / ${formatKRW(p)}`);
+    } else {
+      pushDebug(`tick (received)`);
     }
-
-    const list = JSON.parse(raw);
-    const arr = Array.isArray(list) ? list : [];
-
-    points = arr
-      .map(p => {
-        const t = p.createdAt ?? p.fetchedAt;
-        return { x: new Date(t), y: Number(p.price) };
-      })
-      .filter(p => p.x.toString() !== "Invalid Date" && !isNaN(p.y));
-
-    debug.push(`Loaded history points: ${points.length}`);
-    setDebug(debug);
-
-    render();
+  } catch (err) {
+    pushDebug(`⚠️ tick parse failed: ${String(err)}`);
   }
+});
 
-  function startSse() {
-    const debug = [];
-    debug.push(`SSE connect: ${STREAM_URL}`);
-    setDebug(debug);
+es.onerror = () => {
+  pushDebug("❌ SSE error (browser will retry automatically)");
+};
 
-    const es = new EventSource(STREAM_URL);
-
-    es.addEventListener("ping", (e) => {
-      setDebug([`SSE connected (ping): ${e.data}`]);
-    });
-
-    es.addEventListener("tick", (e) => {
-      // tick: { market, price, createdAt }
-      const tick = JSON.parse(e.data);
-      const x = new Date(tick.createdAt);
-      const y = Number(tick.price);
-
-      if (x.toString() === "Invalid Date" || isNaN(y)) return;
-
-      points.push({ x, y });
-      render();
-
-      setDebug([
-        `SSE OK`,
-        `tick market=${tick.market}`,
-        `tick price=${formatKRW(y)}`,
-        `tick time=${formatKST(x)}`,
-        `points in window=${points.length}`
-      ]);
-    });
-
-    es.onerror = () => {
-      setDebug([`SSE error - 연결이 끊겼거나 서버가 내려갔을 수 있음`]);
-      // 브라우저가 자동 재연결 시도함
-    };
-  }
-
-  // boot
-  ensureChart();
-  loadInitialHistory().then(startSse);
+// 처음엔 비어있어도 안전하게 렌더 한 번
+render();
 </script>
-
 </body>
 </html>

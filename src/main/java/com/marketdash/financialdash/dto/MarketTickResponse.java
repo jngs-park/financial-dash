@@ -6,5 +6,5 @@ import java.time.Instant;
 public record MarketTickResponse(
         String market,
         BigDecimal price,
-        Instant createdAt
+        Instant fetchedAt   // ✅ createdAt → fetchedAt 로 변경
 ) {}

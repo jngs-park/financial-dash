@@ -13,7 +13,7 @@ public class MarketPriceScheduler {
         this.marketService = marketService;
     }
 
-    @Scheduled(fixedDelay = 3000) // 3초
+    @Scheduled(fixedDelay = 3000)
     public void fetch() {
         marketService.fetchAndSaveUpbitPrice("KRW-BTC");
     }

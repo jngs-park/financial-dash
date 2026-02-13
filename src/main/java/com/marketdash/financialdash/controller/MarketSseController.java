@@ -1,4 +1,3 @@
-/*
 package com.marketdash.financialdash.controller;
 
 import com.marketdash.financialdash.service.MarketService;
@@ -8,19 +7,16 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
-public class MarketStreamController {
+public class MarketSseController {
 
     private final MarketService marketService;
 
-    public MarketStreamController(MarketService marketService) {
+    public MarketSseController(MarketService marketService) {
         this.marketService = marketService;
     }
 
-    // 예: /api/market/upbit/stream?market=KRW-BTC
     @GetMapping("/api/market/upbit/stream")
     public SseEmitter stream(@RequestParam String market) {
         return marketService.subscribe(market);
     }
 }
-
- */

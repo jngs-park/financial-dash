@@ -7,6 +7,7 @@ import com.marketdash.financialdash.dto.MarketTickResponse;
 import com.marketdash.financialdash.dto.UpbitTickerResponse;
 import com.marketdash.financialdash.entity.MarketPriceHistory;
 import com.marketdash.financialdash.repository.MarketPriceHistoryRepository;
+import com.marketdash.financialdash.service.cache.LatestPriceStore;
 import com.marketdash.financialdash.service.cache.SimpleCacheStore;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -27,99 +28,158 @@ public class MarketService {
 
     private final UpbitClient upbitClient;
     private final MarketPriceHistoryRepository historyRepository;
+    private final LatestPriceStore latestPriceStore;
 
     private final SimpleCacheStore cacheStore = new SimpleCacheStore();
 
     // market별 연결된 클라이언트 목록
     private final Map<String, CopyOnWriteArrayList<SseEmitter>> emittersByMarket = new ConcurrentHashMap<>();
 
+    // ✅ emitter별 마지막 전송 tick key (중복 전송 방지)
+    private final Map<SseEmitter, String> lastSentKeyByEmitter = new ConcurrentHashMap<>();
+
     public MarketService(UpbitClient upbitClient,
-                         MarketPriceHistoryRepository historyRepository) {
+                         MarketPriceHistoryRepository historyRepository,
+                         LatestPriceStore latestPriceStore) {
         this.upbitClient = upbitClient;
         this.historyRepository = historyRepository;
+        this.latestPriceStore = latestPriceStore;
     }
 
-    /** 현재가 조회 + DB 저장 */
+    /* -------------------------
+       1) REST 현재가 조회용 (캐시 사용)
+       ------------------------- */
     public MarketPriceResponse getUpbitPrice(String market) {
         String cacheKey = "UPBIT:" + market;
 
         MarketPriceResponse cached = cacheStore.get(cacheKey);
         if (cached != null) return cached;
 
-        UpbitTickerResponse ticker = upbitClient.getTicker(market);
+        MarketPriceResponse fresh = fetchFromUpbit(market);
 
-        MarketPriceResponse response = new MarketPriceResponse(
-                market.split("-")[1],
-                ticker.market(),
-                BigDecimal.valueOf(ticker.tradePrice()),
-                Instant.now()
-        );
+        cacheStore.put(cacheKey, fresh, CACHE_TTL);
+        return fresh;
+    }
 
-        // 히스토리 저장
+    /* -------------------------
+       2) 스케줄러 전용: 항상 외부 호출 + DB저장 + Latest저장 + SSE
+       ------------------------- */
+    public void fetchAndSaveUpbitPrice(String market) {
+        // ✅ 캐시 우회: 항상 외부 호출
+        MarketPriceResponse response = fetchFromUpbit(market);
+
+        // ✅ DB 히스토리 저장 (market은 "KRW-BTC" 그대로 저장해야 history 조회가 잘 됨)
         historyRepository.save(MarketPriceHistory.of(
-                response.market(),
+                market,
                 response.price(),
                 "UPBIT"
         ));
 
-        cacheStore.put(cacheKey, response, CACHE_TTL);
-        return response;
-    }
+        // ✅ latest 저장 (지금은 in-memory store지만 나중에 Redis로 바꾸기 쉬움)
+        latestPriceStore.save(market, response);
 
-    /** 스케줄러가 호출: 현재가 조회 + 저장 + SSE 푸시 */
-    public void fetchAndSaveUpbitPrice(String market) {
-        MarketPriceResponse response = getUpbitPrice(market);
-
+        // ✅ SSE push
         publishTick(market, new MarketTickResponse(
-                response.market(),     // ✅ record는 (market, price, createdAt)
+                market,
                 response.price(),
                 response.fetchedAt()
         ));
     }
 
-    /** 히스토리 조회 (Chart.js에서 사용) */
+    private MarketPriceResponse fetchFromUpbit(String market) {
+        UpbitTickerResponse ticker = upbitClient.getTicker(market);
+
+        return new MarketPriceResponse(
+                market.split("-")[1],
+                ticker.market(),
+                BigDecimal.valueOf(ticker.tradePrice()),
+                Instant.now()
+        );
+    }
+
+    /* -------------------------
+       3) 히스토리 조회
+       ------------------------- */
     public List<MarketPriceHistoryResponse> getUpbitPriceHistory(String market) {
         return historyRepository.findByMarketOrderByCreatedAtAsc(market)
                 .stream()
                 .map(h -> new MarketPriceHistoryResponse(
                         h.getPrice(),
-                        h.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant() // ✅ LocalDateTime -> Instant
+                        h.getCreatedAt().atZone(ZoneId.systemDefault()).toInstant()
                 ))
                 .toList();
     }
 
-    /** SSE 구독 */
+    /* -------------------------
+       4) SSE 구독
+       ------------------------- */
     public SseEmitter subscribe(String market) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
-        emittersByMarket.computeIfAbsent(market, k -> new CopyOnWriteArrayList<>()).add(emitter);
+
+        emittersByMarket
+                .computeIfAbsent(market, k -> new CopyOnWriteArrayList<>())
+                .add(emitter);
 
         emitter.onCompletion(() -> removeEmitter(market, emitter));
         emitter.onTimeout(() -> removeEmitter(market, emitter));
         emitter.onError(e -> removeEmitter(market, emitter));
 
-        // 연결 확인용 ping
         try {
             emitter.send(SseEmitter.event().name("ping").data("connected"));
+
+            // ✅ 최신가 1회 push (페이지 처음 들어왔을 때 빈 그래프 방지)
+            MarketPriceResponse latest = latestPriceStore.get(market);
+            if (latest != null) {
+                MarketTickResponse tick = new MarketTickResponse(
+                        market,
+                        latest.price(),
+                        latest.fetchedAt()
+                );
+
+                // ✅ dedupe key 기록
+                lastSentKeyByEmitter.put(emitter, buildTickKey(tick));
+
+                emitter.send(SseEmitter.event().name("tick").data(tick));
+            }
+
         } catch (Exception e) {
             removeEmitter(market, emitter);
         }
+
         return emitter;
     }
 
-    /** SSE로 가격 푸시 */
     public void publishTick(String market, MarketTickResponse tick) {
         var emitters = emittersByMarket.getOrDefault(market, new CopyOnWriteArrayList<>());
+        String key = buildTickKey(tick);
+
         for (SseEmitter emitter : emitters) {
             try {
+                String lastKey = lastSentKeyByEmitter.get(emitter);
+                if (key.equals(lastKey)) {
+                    // ✅ 같은 tick이면 중복 전송 스킵
+                    continue;
+                }
+
                 emitter.send(SseEmitter.event().name("tick").data(tick));
+                lastSentKeyByEmitter.put(emitter, key);
+
             } catch (Exception e) {
                 removeEmitter(market, emitter);
             }
         }
     }
 
+    private String buildTickKey(MarketTickResponse tick) {
+        // ✅ MarketTickResponse는 fetchedAt이므로 여기서도 fetchedAt() 사용
+        return tick.market()
+                + "|" + tick.fetchedAt().toEpochMilli()
+                + "|" + tick.price().toPlainString();
+    }
+
     private void removeEmitter(String market, SseEmitter emitter) {
         var list = emittersByMarket.get(market);
         if (list != null) list.remove(emitter);
+        lastSentKeyByEmitter.remove(emitter);
     }
 }
