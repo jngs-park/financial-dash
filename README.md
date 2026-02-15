@@ -144,3 +144,52 @@ http://localhost:8082
 ✔ 히스토리 조회 API
 ✔ 프론트에서 자동 갱신 그래프 표시
 
+(v0.2)
+# 금융 마켓 대쉬 (Financial Dash)
+
+업비트(Upbit) BTC 시세를 주기적으로 수집하고,
+MySQL에 히스토리를 저장하며,
+Redis에 "최신가"를 캐시하고,
+SSE로 브라우저에 실시간으로 푸시해 Chart.js로 시각화하는 백엔드 중심 프로젝트입니다.
+
+## 데모
+- 웹 페이지: `http://localhost:8082/`
+- SSE 스트림: `/api/market/upbit/stream?market=KRW-BTC`
+- 히스토리 API: `/api/market/upbit/history?market=KRW-BTC`
+
+---
+
+## 기술 스택
+- Backend: Java 17, Spring Boot 4.x, Spring Web MVC
+- DB: MySQL 8 (JPA/Hibernate)
+- Cache: Redis 7 (최신가 캐싱)
+- Real-time: SSE(Server-Sent Events)
+- Front: Thymeleaf + Chart.js
+- Infra/DevOps: Docker, Docker Compose
+
+---
+
+## 아키텍처
+1) Scheduler가 3초마다 업비트 ticker 조회
+2) 조회 결과를
+  - MySQL: `market_price_history` 테이블에 저장(히스토리)
+  - Redis: `LatestPriceStore`에 최신가 저장(캐시)
+3) 동시에 SSE로 브라우저에 tick 푸시
+4) 브라우저는 tick을 수신해 최근 10분 window 그래프 갱신 + MA5/MA20 표시
+
+---
+
+## 주요 기능
+- **현재가 조회 API**: 캐시(TTL 3초) 적용
+- **히스토리 저장/조회**: MySQL 기반 (Chart.js 표시용)
+- **최신가 캐시**: Redis 기반 (SSE 최초 연결 시 1회 최신가 push)
+- **실시간 스트리밍**: SSE로 tick 이벤트 전송
+- **프론트 시각화**: 최근 N분 window, 이동평균(MA5/MA20) 계산 및 표시
+
+---
+
+## 실행 방법 (Docker Compose)
+### 1) 컨테이너 기동
+```bash
+docker compose up -d --build
+docker compose ps
