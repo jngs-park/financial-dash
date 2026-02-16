@@ -13,3 +13,6 @@ target/
 
 # Env
 .env
+
+# private files
+docs-private/
